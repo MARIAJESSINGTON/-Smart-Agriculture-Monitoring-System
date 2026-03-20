@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>AgriSense — Smart Agriculture Monitoring</title>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+  <script type="module">
+    import { Client } from "https://cdn.jsdelivr.net/npm/@gradio/client/dist/index.min.js";
+
+    const SPACE = "mariajessington/Smart-Agriculture-Monitoring-System";
+    let gradioClient = null;
+
+    async function getClient() {
+      if (!gradioClient) {
+        gradioClient = await Client.connect(SPACE);
+      }
+      return gradioClient;
+    }
+
+    // ── CROP ──────────────────────────────────────
+    window.doCrop = async function () {
+      const ids = ['nitrogen','phosphorus','potassium','temperature','humidity','ph','rainfall'];
+      const vals = {};
+      for (const id of ids) {
+        const v = document.getElementById(id).value.trim();
+        if (!v) { alert('Please fill all fields.'); return; }
+        vals[id] = parseFloat(v);
+      }
+      ld('btn-crop', true);
+      try {
+        const app = await getClient();
+        const result = await app.predict("/tab_crop", {
+          nitrogen:    vals.nitrogen,
+          phosphorus:  vals.phosphorus,
+          potassium:   vals.potassium,
+          temperature: vals.temperature,
+          humidity:    vals.humidity,
+          ph:          vals.ph,
+          rainfall:    vals.rainfall,
+        });
+        // result.data[0] is the markdown string like "🌾 Recommended Crop: **Rice**"
+        const raw = result.data[0] || '';
+        const clean = raw.replace(/\*\*(.+?)\*\*/g, '$1').replace(/^.*Recommended Crop:\s*/i, '').trim();
+        showR('r-crop', 'rv-crop', clean || raw, false);
+      } catch(e) {
+        showR('r-crop', 'rv-crop', 'Error: ' + e.message, true);
+      }
+      ld('btn-crop', false);
+    };
+
+    // ── IRRIGATION ───────────────────────────────
+    window.doIrr = async function () {
+      const sm = document.getElementById('soil_moisture').value.trim();
+      const st = document.getElementById('soil_temp').value.trim();
+      const h  = document.getElementById('irr_humidity').value.trim();
+      if (!sm || !st || !h) { alert('Please fill all fields.'); return; }
+      ld('btn-irr', true);
+      try {
+        const app = await getClient();
+        const result = await app.predict("/tab_irrigation", {
+          soil_moisture: parseFloat(sm),
+          soil_temp:     parseFloat(st),
+          humidity:      parseFloat(h),
+        });
+        const raw = result.data[0] || '';
+        // extract label like "High", "Medium", "Low"
+        const match = raw.match(/\*\*(.+?)\*\*/);
+        const label = match ? match[1].replace(' Irrigation','').trim() : raw;
+        document.getElementById('ri-irr').textContent = {High:'🔴',Medium:'🟡',Low:'🟢'}[label] || '💧';
+        showR('r-irr', 'rv-irr', label + ' Irrigation', false);
+      } catch(e) {
+        showR('r-irr', 'rv-irr', 'Error: ' + e.message, true);
+      }
+      ld('btn-irr', false);
+    };
+
+    // ── SHOW MAP ─────────────────────────────────
+    window.showMap = async function () {
+      const lat = parseFloat(document.getElementById('geo_lat').value);
+      const lon = parseFloat(document.getElementById('geo_lon').value);
+      if (isNaN(lat) || isNaN(lon)) { alert('Enter both Latitude and Longitude first.'); return; }
+      if (lat < -90 || lat > 90 || lon < -180 || lon > 180) { alert('Invalid coordinates.'); return; }
+
+      ld('btn-map', true);
+      document.querySelector('#btn-map .bt').textContent = '⏳ Loading map…';
+      try {
+        const app = await getClient();
+        const result = await app.predict("/show_map_html", { lat, lon });
+        const html = result.data[0] || '';
+        if (html) {
+          document.getElementById('folium-frame').srcdoc = html;
+          document.getElementById('map-wrap').className = 'map-wrap on';
+          const coords = document.getElementById('map-coords');
+          coords.textContent = `📍 Showing: Lat ${lat.toFixed(5)},  Lon ${lon.toFixed(5)}`;
+          coords.className = 'map-coords on';
+        } else {
+          alert('No map returned from server.');
+        }
+      } catch(e) {
+        alert('Map error: ' + e.message);
+      }
+      document.querySelector('#btn-map .bt').textContent = '🗺️ Show on Map';
+      ld('btn-map', false);
+    };
+
+    // ── GEO ANALYSIS ─────────────────────────────
+    window.doGeo = async function () {
+      const lat = document.getElementById('geo_lat').value.trim();
+      const lon = document.getElementById('geo_lon').value.trim();
+      if (!lat || !lon) { alert('Enter Latitude and Longitude.'); return; }
+
+      document.getElementById('geo-err').className = 'geo-err';
+      document.getElementById('geo-out').className = 'geo-out';
+      document.querySelector('#btn-geo .bt').textContent = '⏳ Analysing…';
+      ld('btn-geo', true);
+
+      try {
+        const app = await getClient();
+        const result = await app.predict("/tab_geo", {
+          lat: parseFloat(lat),
+          lon: parseFloat(lon),
+        });
+
+        const raw = result.data[0] || '';
+
+        if (raw.startsWith('❌')) {
+          const e = document.getElementById('geo-err');
+          e.textContent = raw; e.className = 'geo-err on';
+        } else {
+          renderGeoMarkdown(raw);
+          document.getElementById('geo-out').className = 'geo-out on';
+          showMap();
+        }
+      } catch(e) {
+        const er = document.getElementById('geo-err');
+        er.textContent = '⚠️ Error: ' + e.message; er.className = 'geo-err on';
+      }
+
+      document.querySelector('#btn-geo .bt').textContent = '🔍 Analyse My Land';
+      ld('btn-geo', false);
+    };
+
+    // Parse the markdown text returned by tab_geo and render it nicely
+    function renderGeoMarkdown(text) {
+      // Extract warnings (lines starting with ⚠️)
+      const wa = document.getElementById('warn-area'); wa.innerHTML = '';
+      text.split('\n').filter(l => l.startsWith('⚠️')).forEach(w => {
+        wa.innerHTML += `<div class="warn-box"><span>⚠️</span><span>${w.replace('⚠️','').trim()}</span></div>`;
+      });
+
+      // Extract data source
+      const srcMatch = text.match(/\*\*Data Source:\*\*\s*(.+)/);
+      document.getElementById('src-pill').textContent = '📡 ' + (srcMatch ? srcMatch[1].trim() : '—');
+
+      // Extract soil type
+      const stMatch = text.match(/\*\*Soil Type:\*\*\s*(.+)/);
+      document.getElementById('soil-badge').textContent = '🪨 Soil Type: ' + (stMatch ? stMatch[1].trim() : 'Unknown');
+
+      // Extract climate values
+      const cs = document.getElementById('climate-strip'); cs.innerHTML = '';
+      const tempM  = text.match(/Avg\s+([\d.]+)°C/);
+      const rainM  = text.match(/Rain\s+([\d.]+)mm/);
+      const humM   = text.match(/Humidity\s+([\d.]+)%/);
+      if (tempM) cs.innerHTML += chip('🌡 Avg Temp',  tempM[1],  '°C');
+      if (rainM) cs.innerHTML += chip('🌧 Rainfall',  rainM[1],  'mm/week');
+      if (humM)  cs.innerHTML += chip('💧 Humidity',  humM[1],   '%');
+
+      // Extract soil metrics
+      const soilKeys = [
+        {l:'Clay',     r:/\*\*Clay:\*\*\s*([\d.]+)%/,        u:'%'},
+        {l:'Sand',     r:/\*\*Sand:\*\*\s*([\d.]+)%/,        u:'%'},
+        {l:'Silt',     r:/\*\*Silt:\*\*\s*([\d.]+)%/,        u:'%'},
+        {l:'pH',       r:/\*\*pH:\*\*\s*([\d.]+)/,           u:''},
+        {l:'Org.Carbon',r:/\*\*Organic Carbon:\*\*\s*([\d.]+)\s*g\/kg/, u:'g/kg'},
+        {l:'Nitrogen', r:/\*\*Nitrogen:\*\*\s*([\d.]+)\s*g\/kg/, u:'g/kg'},
+        {l:'CEC',      r:/\*\*CEC:\*\*\s*([\d.]+)\s*cmol/,   u:'cmolc/kg'},
+      ];
+      document.getElementById('sg').innerHTML = soilKeys.map(s => {
+        const m = text.match(s.r);
+        const v = m ? m[1] : '–';
+        return `<div class="sc"><div class="sl">${s.l}</div><div class="sv">${v}</div><div class="su">${s.u}</div></div>`;
+      }).join('');
+
+      // Extract AI report — everything after "---"
+      const parts = text.split('---');
+      const aiText = parts.length > 1 ? parts.slice(1).join('---').replace(/\*\*AI Report\*\*.*?:\n\n/s,'').trim() : '';
+      document.getElementById('ai-body').innerHTML = aiText
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\n/g, '<br>');
+
+      // Show model used
+      const modelMatch = text.match(/via (.+?)\):/);
+      document.getElementById('model-pill').textContent = '🤖 ' + (modelMatch ? modelMatch[1].split('/').pop() : 'AI');
+    }
+
+    function chip(label, val, unit) {
+      return `<div class="cc"><div class="cl">${label}</div><div class="cv">${val}</div><div class="cu">${unit}</div></div>`;
+    }
+
+    // ── UI helpers ────────────────────────────────
+    window.go = function(n, el) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('on'));
+      el.classList.add('active');
+      document.getElementById('p-' + n).classList.add('on');
+    };
+
+    function ld(id, on) {
+      const b = document.getElementById(id);
+      b.classList.toggle('ld', on);
+      b.disabled = on;
+    }
+
+    function showR(box, val, v, err) {
+      document.getElementById(box).className = 'rb ' + (err ? 'er' : 'ok');
+      document.getElementById(val).textContent = v;
+    }
+
+    // Pre-connect on page load so first request is faster
+    window.addEventListener('load', () => {
+      getClient().catch(() => {});
+    });
+  </script>
+  <style>
+    :root{
+      --gd:#1a3a2a;--gm:#2d6a4f;--gb:#52b788;--gl:#95d5b2;--gp:#d8f3dc;
+      --soil:#8b5e3c;--slt:#f5ebe0;--sbr:#ddb896;
+      --cream:#fefae0;--white:#fff;
+      --txt:#1a1a1a;--mut:#5a6a5f;--bdr:#d8eddf;--shd:rgba(26,58,42,.08);
+    }
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+    body{font-family:'DM Sans',sans-serif;background:var(--cream);color:var(--txt);min-height:100vh;}
+
+    header{background:var(--gd);color:#fff;padding:52px 40px 44px;position:relative;overflow:hidden;}
+    header::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at 85% 40%,rgba(82,183,136,.22) 0%,transparent 60%);pointer-events:none;}
+    .hdr{max-width:1140px;margin:0 auto;position:relative;z-index:1;display:flex;justify-content:space-between;align-items:flex-end;gap:20px;flex-wrap:wrap;}
+    .badge{display:inline-flex;align-items:center;gap:6px;background:rgba(82,183,136,.15);border:1px solid rgba(82,183,136,.35);color:var(--gl);font-size:10.5px;font-weight:500;letter-spacing:2px;text-transform:uppercase;padding:5px 14px;border-radius:30px;margin-bottom:18px;}
+    header h1{font-family:'Playfair Display',serif;font-size:clamp(2.4rem,5vw,4rem);font-weight:900;line-height:1.05;letter-spacing:-1.5px;}
+    header h1 em{color:var(--gb);font-style:normal;}
+    header p{margin-top:12px;font-size:.98rem;color:rgba(255,255,255,.58);max-width:480px;line-height:1.65;font-weight:300;}
+
+    .main{max-width:1140px;margin:0 auto;padding:44px 24px 72px;}
+
+    .tabs{display:flex;gap:10px;margin-bottom:32px;flex-wrap:wrap;}
+    .tab{display:inline-flex;align-items:center;gap:9px;padding:13px 22px;border:2px solid var(--bdr);background:var(--white);border-radius:14px;font-family:'DM Sans',sans-serif;font-size:.9rem;font-weight:500;cursor:pointer;color:var(--mut);transition:all .22s;min-width:175px;}
+    .tab:hover{border-color:var(--gb);color:var(--gm);transform:translateY(-1px);}
+    .tab .ti{font-size:1.2rem;}
+    .tab.active{background:var(--gd);border-color:var(--gd);color:#fff;box-shadow:0 6px 20px rgba(26,58,42,.28);}
+    .tab.tgeo.active{background:var(--soil);border-color:var(--soil);}
+
+    .panel{display:none;}
+    .panel.on{display:block;animation:up .32s cubic-bezier(.4,0,.2,1);}
+    @keyframes up{from{opacity:0;transform:translateY(20px);}to{opacity:1;transform:translateY(0);}}
+
+    .card{background:var(--white);border:1px solid var(--bdr);border-radius:22px;padding:40px;box-shadow:0 2px 24px var(--shd);}
+    .card h2{font-family:'Playfair Display',serif;font-size:1.5rem;font-weight:700;color:var(--gd);margin-bottom:6px;}
+    .card h2.sh{color:var(--soil);}
+    .card .sub{font-size:.86rem;color:var(--mut);line-height:1.55;margin-bottom:28px;}
+
+    .fg{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:18px;margin-bottom:28px;}
+    .fg2{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:20px;}
+    .fg3{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-bottom:28px;}
+    .fld{display:flex;flex-direction:column;gap:6px;}
+    .fld label{font-size:.72rem;font-weight:600;letter-spacing:.6px;text-transform:uppercase;color:var(--mut);}
+    .fld input{padding:11px 15px;border:1.5px solid var(--bdr);border-radius:10px;font-family:'DM Sans',sans-serif;font-size:.93rem;color:var(--txt);background:#fafdfc;outline:none;transition:border .18s,box-shadow .18s;}
+    .fld input:focus{border-color:var(--gb);box-shadow:0 0 0 3.5px rgba(82,183,136,.13);}
+    .fld input.sf:focus{border-color:var(--soil);box-shadow:0 0 0 3.5px rgba(139,94,60,.13);}
+    .fld .hint{font-size:.7rem;color:#b0bdb4;}
+
+    .btn{display:inline-flex;align-items:center;gap:9px;padding:14px 32px;border:none;border-radius:12px;font-family:'DM Sans',sans-serif;font-size:.96rem;font-weight:500;cursor:pointer;transition:all .2s;}
+    .bg{background:var(--gm);color:#fff;box-shadow:0 4px 14px rgba(45,106,79,.28);}
+    .bg:hover{background:var(--gd);transform:translateY(-2px);}
+    .bs{background:var(--soil);color:#fff;box-shadow:0 4px 14px rgba(139,94,60,.28);}
+    .bs:hover{background:#6b3e20;transform:translateY(-2px);}
+    .btn:active{transform:translateY(0)!important;}
+    .btn:disabled{opacity:.7;cursor:not-allowed;transform:none!important;}
+    .sp{width:17px;height:17px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:rot .65s linear infinite;display:none;}
+    .btn.ld .sp{display:block;}.btn.ld .bt{display:none;}
+    @keyframes rot{to{transform:rotate(360deg);}}
+
+    .rb{margin-top:24px;padding:20px 24px;border-radius:14px;display:none;}
+    .rb.ok{display:flex;align-items:center;gap:18px;background:linear-gradient(135deg,#e9f9f0,#cff0e0);border:1.5px solid var(--gl);}
+    .rb.er{display:flex;align-items:center;gap:14px;background:#fff5f5;border:1.5px solid #f4baba;}
+    .ri{font-size:2.3rem;line-height:1;flex-shrink:0;}
+    .rl{font-size:.71rem;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--gm);margin-bottom:4px;}
+    .rv{font-family:'Playfair Display',serif;font-size:1.6rem;font-weight:700;color:var(--gd);}
+    .rb.er .rl{color:#b03030;}.rb.er .rv{font-family:'DM Sans',sans-serif;font-size:.92rem;color:#b03030;font-weight:400;}
+
+    .map-section{margin-top:22px;}
+    .map-wrap{border-radius:16px;overflow:hidden;border:2px solid var(--sbr);background:#eef6ee;display:none;margin-top:18px;}
+    .map-wrap.on{display:block;animation:up .3s ease;}
+    .map-wrap iframe{width:100%;height:400px;border:none;display:block;}
+    .map-coords{background:var(--slt);border:1px solid var(--sbr);border-radius:10px;padding:10px 16px;font-size:.82rem;color:var(--soil);font-weight:500;margin-top:10px;display:none;}
+    .map-coords.on{display:block;}
+
+    .geo-out{margin-top:28px;display:none;}
+    .geo-out.on{display:block;animation:up .35s ease;}
+    .warn-box{display:flex;align-items:flex-start;gap:10px;background:#fffbea;border:1.5px solid #f0d060;border-radius:12px;padding:14px 18px;margin-bottom:18px;font-size:.85rem;color:#7a5a00;line-height:1.5;}
+    .src-pill{display:inline-flex;align-items:center;gap:6px;background:#f0faf4;border:1px solid var(--gl);color:var(--gm);font-size:.74rem;font-weight:500;padding:4px 12px;border-radius:20px;margin-bottom:14px;}
+    .model-pill{display:inline-flex;align-items:center;gap:6px;background:#f0f0ff;border:1px solid #b0b0e0;color:#404090;font-size:.72rem;font-weight:500;padding:4px 12px;border-radius:20px;margin-bottom:14px;margin-left:6px;}
+    .climate-strip{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px;}
+    .cc{background:#f0f8ff;border:1px solid #b8d8f0;border-radius:10px;padding:10px 16px;text-align:center;min-width:110px;}
+    .cc .cl{font-size:.68rem;text-transform:uppercase;letter-spacing:.6px;color:#3060a0;font-weight:600;margin-bottom:4px;}
+    .cc .cv{font-family:'Playfair Display',serif;font-size:1.2rem;font-weight:700;color:#1a3060;}
+    .cc .cu{font-size:.65rem;color:#6080a0;}
+    .soil-badge{display:inline-flex;align-items:center;gap:8px;background:var(--soil);color:#fff;padding:7px 20px;border-radius:30px;font-size:.87rem;font-weight:500;margin-bottom:18px;box-shadow:0 3px 12px rgba(139,94,60,.25);}
+    .sg{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px;margin-bottom:22px;}
+    .sc{background:var(--slt);border:1px solid var(--sbr);border-radius:12px;padding:12px 10px;text-align:center;}
+    .sc .sl{font-size:.67rem;text-transform:uppercase;letter-spacing:.7px;color:var(--soil);font-weight:600;margin-bottom:4px;}
+    .sc .sv{font-family:'Playfair Display',serif;font-size:1.25rem;font-weight:700;color:#3a1800;line-height:1;}
+    .sc .su{font-size:.62rem;color:#9a7050;margin-top:2px;}
+    .ai-box{background:#fffdf5;border:1px solid #e5d8b8;border-radius:18px;overflow:hidden;}
+    .ai-head{background:linear-gradient(90deg,var(--gm),var(--gd));padding:14px 24px;display:flex;align-items:center;gap:12px;}
+    .ai-head span{color:#fff;font-family:'Playfair Display',serif;font-size:1rem;font-weight:700;}
+    .ai-pill{background:linear-gradient(135deg,#ff7043,#ffa726);color:#fff;font-size:.66rem;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;padding:3px 10px;border-radius:20px;}
+    .ai-body{padding:24px 28px;font-size:.9rem;line-height:1.82;color:#2d1e0e;}
+    .ai-body strong{color:#6b3e20;}
+    .geo-err{margin-top:16px;padding:14px 18px;background:#fff5f5;border:1.5px solid #f4baba;border-radius:12px;color:#b03030;display:none;font-size:.87rem;}
+    .geo-err.on{display:block;}
+
+    /* Connection status banner */
+    .conn-bar{background:#fffbe6;border-bottom:1px solid #f0d060;padding:8px 24px;font-size:.8rem;color:#7a5a00;text-align:center;display:none;}
+    .conn-bar.on{display:block;}
+
+    footer{text-align:center;padding:32px 20px;color:var(--mut);font-size:.78rem;border-top:1px solid var(--bdr);}
+    footer strong{color:var(--gm);}
+
+    @media(max-width:640px){
+      header{padding:36px 18px 30px;}.main{padding:28px 14px 56px;}.card{padding:22px 16px;}
+      .tabs{flex-direction:column;}.tab{max-width:100%;}
+      .fg3,.fg2{grid-template-columns:1fr;}
+      .ai-body{padding:18px;}
+    }
+  </style>
+</head>
+<body>
+
+<div class="conn-bar" id="conn-bar">⏳ Connecting to AgriSense backend…</div>
+
+<header>
+  <div class="hdr">
+    <div>
+      <div class="badge">🌱 Smart Agriculture Monitoring System</div>
+      <h1>Agri<em>Sense</em></h1>
+      <p>Deep learning crop &amp; irrigation predictions plus real-time geo soil analysis with AI breed recommendations.</p>
+    </div>
+    <div style="text-align:right">
+      <span style="display:inline-block;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);color:rgba(255,255,255,.6);font-size:11px;padding:4px 12px;border-radius:20px;margin:3px;">🤖 Deep Learning</span>
+      <span style="display:inline-block;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);color:rgba(255,255,255,.6);font-size:11px;padding:4px 12px;border-radius:20px;margin:3px;">🌍 SoilGrids</span><br>
+      <span style="display:inline-block;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);color:rgba(255,255,255,.6);font-size:11px;padding:4px 12px;border-radius:20px;margin:3px;">🗺️ Folium</span>
+      <span style="display:inline-block;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);color:rgba(255,255,255,.6);font-size:11px;padding:4px 12px;border-radius:20px;margin:3px;">🌤 Open-Meteo</span>
+    </div>
+  </div>
+</header>
+
+<div class="main">
+  <div class="tabs">
+    <button class="tab active" onclick="go('crop',this)"><span class="ti">🌾</span>Crop Recommendation</button>
+    <button class="tab" onclick="go('irr',this)"><span class="ti">💧</span>Irrigation Advisor</button>
+    <button class="tab tgeo" onclick="go('geo',this)"><span class="ti">🗺️</span>Geo Soil Analysis</button>
+  </div>
+
+  <!-- CROP -->
+  <div id="p-crop" class="panel on">
+    <div class="card">
+      <h2>🌾 Crop Recommendation</h2>
+      <p class="sub">Enter soil nutrient levels and climate data. The deep learning model recommends the most suitable crop.</p>
+      <div class="fg">
+        <div class="fld"><label>Nitrogen (N)</label><input type="number" id="nitrogen" placeholder="e.g. 90" step="any"/><span class="hint">kg/ha</span></div>
+        <div class="fld"><label>Phosphorus (P)</label><input type="number" id="phosphorus" placeholder="e.g. 42" step="any"/><span class="hint">kg/ha</span></div>
+        <div class="fld"><label>Potassium (K)</label><input type="number" id="potassium" placeholder="e.g. 43" step="any"/><span class="hint">kg/ha</span></div>
+        <div class="fld"><label>Temperature</label><input type="number" id="temperature" placeholder="e.g. 20.8" step="any"/><span class="hint">°C</span></div>
+        <div class="fld"><label>Humidity</label><input type="number" id="humidity" placeholder="e.g. 82" step="any"/><span class="hint">%</span></div>
+        <div class="fld"><label>Soil pH</label><input type="number" id="ph" placeholder="e.g. 6.5" step="any"/><span class="hint">0–14</span></div>
+        <div class="fld"><label>Rainfall</label><input type="number" id="rainfall" placeholder="e.g. 202" step="any"/><span class="hint">mm</span></div>
+      </div>
+      <button class="btn bg" id="btn-crop" onclick="doCrop()"><div class="sp"></div><span class="bt">🌾 Predict Best Crop</span></button>
+      <div class="rb" id="r-crop">
+        <div class="ri">🌿</div>
+        <div><div class="rl">Recommended Crop</div><div class="rv" id="rv-crop"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- IRRIGATION -->
+  <div id="p-irr" class="panel">
+    <div class="card">
+      <h2>💧 Irrigation Advisor</h2>
+      <p class="sub">Enter current soil conditions. The model classifies irrigation need as High, Medium, or Low.</p>
+      <div class="fg3">
+        <div class="fld"><label>Soil Moisture</label><input type="number" id="soil_moisture" placeholder="e.g. 55" step="any"/><span class="hint">% volumetric</span></div>
+        <div class="fld"><label>Soil Temperature</label><input type="number" id="soil_temp" placeholder="e.g. 24" step="any"/><span class="hint">°C</span></div>
+        <div class="fld"><label>Humidity</label><input type="number" id="irr_humidity" placeholder="e.g. 70" step="any"/><span class="hint">%</span></div>
+      </div>
+      <button class="btn bg" id="btn-irr" onclick="doIrr()"><div class="sp"></div><span class="bt">💧 Predict Irrigation Need</span></button>
+      <div class="rb" id="r-irr">
+        <div class="ri" id="ri-irr">💧</div>
+        <div><div class="rl">Irrigation Level</div><div class="rv" id="rv-irr"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- GEO -->
+  <div id="p-geo" class="panel">
+    <div class="card">
+      <h2 class="sh">🗺️ Geo Soil Analysis</h2>
+      <p class="sub">Enter your farm coordinates to view the location on a map, then analyse the soil for AI crop recommendations.</p>
+      <div class="fg2">
+        <div class="fld"><label>Latitude</label><input type="number" id="geo_lat" placeholder="e.g. 11.0168" step="any" class="sf"/><span class="hint">-90 to 90</span></div>
+        <div class="fld"><label>Longitude</label><input type="number" id="geo_lon" placeholder="e.g. 76.9558" step="any" class="sf"/><span class="hint">-180 to 180</span></div>
+      </div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;">
+        <button class="btn bs" id="btn-map" onclick="showMap()"><div class="sp"></div><span class="bt">🗺️ Show on Map</span></button>
+        <button class="btn bg" id="btn-geo" onclick="doGeo()"><div class="sp"></div><span class="bt">🔍 Analyse My Land</span></button>
+      </div>
+      <div class="map-section">
+        <div class="map-wrap" id="map-wrap">
+          <iframe id="folium-frame" srcdoc="" style="width:100%;height:400px;border:none;"></iframe>
+        </div>
+        <div class="map-coords" id="map-coords"></div>
+      </div>
+      <div class="geo-err" id="geo-err"></div>
+      <div class="geo-out" id="geo-out">
+        <div id="warn-area"></div>
+        <div>
+          <span class="src-pill" id="src-pill">📡 —</span>
+          <span class="model-pill" id="model-pill">🤖 —</span>
+        </div>
+        <div class="climate-strip" id="climate-strip"></div>
+        <div class="soil-badge" id="soil-badge">🪨 Soil Type: —</div>
+        <div class="sg" id="sg"></div>
+        <div class="ai-box">
+          <div class="ai-head">
+            <span>AI Agronomist Report</span>
+            <span class="ai-pill">✦ OpenRouter AI</span>
+          </div>
+          <div class="ai-body" id="ai-body"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<footer><strong>AgriSense</strong> — Smart Agriculture Monitoring &nbsp;|&nbsp; TensorFlow · SoilGrids · Folium · Open-Meteo · OpenRouter</footer>
+
+</body>
+</html>
