@@ -73,9 +73,6 @@ python src/train_soil_dl.py
 ```bash
 python app.py
 ```
-
-- Access the frontend at: [http://localhost:5000](http://localhost:5000)
-
 ---
 
 ## 🤝 Contributing
